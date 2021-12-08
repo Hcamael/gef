@@ -4730,6 +4730,167 @@ class GenericCommand(gdb.Command, metaclass=abc.ABCMeta):
 #     def do_invoke(self, argv):
 #         return
 
+@register_command
+class ExecveCommand(GenericCommand):
+    """use execve do anything cmd"""
+    _cmdline_ = "execve"
+    _syntax_  = "{:s} [cmd]|set addr [address]".format(_cmdline_)
+    _example_ = "{:s} /usr/sbin/telnetd -l /bin/bash -p 23333\n{:s} set addr 0x7fb4360748ae".format(_cmdline_)
+    _aliases_ = ["exec",]
+    def __init__(self):
+        super().__init__(complete=gdb.COMPLETE_FILENAME)
+        self.findAddr = None
+        return
+
+    @only_if_gdb_running
+    def do_invoke(self, argv):
+        '''
+        mips/arm todo
+
+        arch/ABI      arg1  arg2  arg3  arg4  arg5  arg6  arg7  Notes
+        ──────────────────────────────────────────────────────────────────
+        arm/OABI      a1    a2    a3    a4    v1    v2    v3
+        arm/EABI      r0    r1    r2    r3    r4    r5    r6
+        arm64         x0    x1    x2    x3    x4    x5    -
+        blackfin      R0    R1    R2    R3    R4    R5    -
+        i386          ebx   ecx   edx   esi   edi   ebp   -
+        ia64          out0  out1  out2  out3  out4  out5  -
+        mips/o32      a0    a1    a2    a3    -     -     -     See below
+        mips/n32,64   a0    a1    a2    a3    a4    a5    -
+        parisc        r26   r25   r24   r23   r22   r21   -
+        s390          r2    r3    r4    r5    r6    r7    -
+        s390x         r2    r3    r4    r5    r6    r7    -
+        sparc/32      o0    o1    o2    o3    o4    o5    -
+        sparc/64      o0    o1    o2    o3    o4    o5    -
+        x86_64        rdi   rsi   rdx   r10   r8    r9    -
+        x32           rdi   rsi   rdx   r10   r8    r9    -
+
+        arm/OABI   swi NR               -           a1     NR is syscall #
+        arm/EABI   swi 0x0              r7          r0
+        arm64      svc #0               x8          x0
+        blackfin   excpt 0x0            P0          R0
+        i386       int $0x80            eax         eax                  0x80CD
+        ia64       break 0x100000       r15         r8     See below
+        mips       syscall              v0          v0     See below
+        parisc     ble 0x100(%sr2, %r0) r20         r28
+        s390       svc 0                r1          r2     See below
+        s390x      svc 0                r1          r2     See below
+        sparc/32   t 0x10               g1          o0
+        sparc/64   t 0x6d               g1          o0
+        x86_64     syscall              rax         rax    See below     0x050F
+        x32        syscall              rax         rax    See below
+
+        execve:
+        arm64/h8300/hexagon/ia64/m68k/nds32/nios2/openrisc/riscv32/riscv64/c6x/tile/tile64/unicore32/score/metag: 221
+        arm/i386/powerpc64/powerpc/s390x/s390/arc/csky/parisc/sh/xtensa/avr32/blackfin/cris/frv/sh64/mn10300/m32r: 11
+        armoabi: 9437195
+        x86_64/alpha/sparc/sparc64: 59
+        x32:  1073742344
+        mips64: 5057
+        mips64n32: 6057
+        mipso32: 4011
+        microblaze: 1033
+        xtensa:	117
+        '''
+        if len(argv) > 0:
+            if argv[0] == "debug":
+                # debug = 1
+                dofunc = print
+                argv = argv[1:]
+            elif argv[0] == "set":
+                if argv[1] == "addr":
+                    self.findAddr = int(argv[2], 16)
+                    info("set success")
+                return
+            else:
+                # debug = 0
+                dofunc = gdb.execute
+        else:
+            err("The lack of argv.")
+            return
+        cmd = " ".join(argv)
+        cmd = [b"/bin/sh", b"-c", cmd.encode()]
+        # print(current_arch.sp)
+        # print(current_arch.pc)
+        # print(current_arch.ptrsize)
+        # print(endian_str())
+        # print(current_arch.syscall_instructions)
+        # print(current_arch.syscall_register)
+        # print(current_arch.special_registers)
+        # print(current_arch.function_parameters)
+        # print(current_arch.arch)
+        # print(current_arch.get_ith_parameter)
+        # print(current_arch.gpr_registers)
+        # print(current_arch.get_ra)
+        # write_memory
+        try:
+            rsp = current_arch.sp
+            nowpc = self.findAddr or current_arch.pc
+        except gdb.error as e:
+            err("%s Please start first."%e)
+            return
+        bit = current_arch.ptrsize
+        if current_arch.arch == "X86":
+            arg0 = "$rdi" if bit == 8 else "$ebx"
+            arg1 = "$rsi" if bit == 8 else "$ecx"
+            arg2 = "$rdx" if bit == 8 else "$edx"
+            sysreg = current_arch.syscall_register
+            sysreg_value = 59 if bit == 8 else 11
+            syscall_instr = 0x050F if bit == 8 else 0x80CD
+        else:
+            err("%s can't implementation." % current_arch.arch)
+            return
+        spc = nowpc & (~0xFFF)
+        res = gdb.execute("find /h %s,%s,%s"%(spc, spc+0x10000, syscall_instr), to_string=True)
+        if "patterns found." not in res:
+            err("can't find syscall. Please break in libc.")
+            return
+        newpc = res.splitlines()[0]
+        endian_symbol = endian_str()
+        endian = "little" if endian_symbol == "<" else "big"
+        startaddr = rsp + 0x100
+        args_list = []
+        # cmd write to stack
+        for cstr in cmd:
+            args_list.append(startaddr)
+            cstr += b"\x00" * (4 - (len(cstr) % 4))
+            length = len(cstr)
+            write_memory(startaddr, cstr, length)
+            startaddr += length
+            # for i in range(0, len(cstr), 4):
+            #     t = hex(struct.unpack(endian_symbol+'I', cstr[i:i+4])[0])
+            #     dofunc("set  *(%s)=%s"%(hex(startaddr), t))
+                # startaddr += 4
+        args_list.append(0)
+        # set cmd point (rsi)
+        rsiAddr = rsp + 0x50
+        endian = "little" if endian_str() == "<" else "big"
+        addrvalue = b""
+        for addr in args_list:
+            addrvalue += addr.to_bytes(bit, endian)
+        write_memory(rsiAddr, addrvalue, len(addrvalue))
+            # for i in range(0, len(addr), 4):
+            #     t = hex(struct.unpack(endian_symbol+'I', addr[i:i+4])[0])
+            #     dofunc("set  *(%s+%d)=%s"%(hex(rsiAddr), i, t))
+            # rsiAddr += bit
+
+        # set first arguments.
+        dofunc("set %s=%s"%(arg0, hex(args_list[0])))
+        # set second arguments
+        dofunc("set %s=%s"%(arg1, hex(rsp + 0x50)))
+        # set third arguments
+        dofunc("set %s=0"%arg2)
+        # set syscall register
+        dofunc("set %s=%s"%(sysreg, sysreg_value))
+        # set $pc=$sp
+        dofunc("set $pc=%s"%newpc)
+        # set *$pc
+        # dofunc("set *(int *)$pc=%s"%hex(syscall_instr))
+        # show context
+        # dofunc("context")
+        # continue
+        dofunc("c")
+        return
 
 @register_command
 class VersionCommand(GenericCommand):
